@@ -27,16 +27,16 @@ class RobotSimulatorGUI:
         self.is_executing = False
         self.is_waiting = False
         self.wait_start_time = 0
-        self.wait_duration = 0.5
+        self.wait_duration = 0.5  # Thời gian chờ (nhanh)
 
         self.destination = None
         self.current_algo = "DWA"
 
-        # --- KHỞI TẠO PLANNERS ---
+        # --- KHỞI TẠO PLANNERS & CẤU HÌNH TỐC ĐỘ ---
         self.dwa = DWA_Planner(robot, obstacles, dt, predict_time=2.0)
-        self.dwa.max_speed = 3.0
-        self.dwa.max_accel = 2.0
-        self.dwa.max_yawrate = 4.0
+        self.dwa.max_speed = 4.0
+        self.dwa.max_accel = 3.0
+        self.dwa.max_yawrate = 6.0
 
         self.bug = BugPlanner(robot, obstacles, step_size=0.5)
         self.astar = AStarPlanner(obstacles, resolution=0.5, robot_radius=1.0)
@@ -131,7 +131,12 @@ class RobotSimulatorGUI:
             fill="x", pady=2
         )
 
-        # --- [NEW] NÚT VỀ BẾP KHẨN CẤP ---
+        # --- NÚT RESET HỆ THỐNG (MỚI) ---
+        ttk.Button(panel, text="🔄 RESET SYSTEM", command=self.reset_system).pack(
+            fill="x", pady=2
+        )
+
+        # NÚT VỀ BẾP KHẨN CẤP
         style = ttk.Style()
         style.configure(
             "Emergency.TButton", foreground="red", font=("Arial", 10, "bold")
@@ -142,37 +147,59 @@ class RobotSimulatorGUI:
             style="Emergency.TButton",
             command=self.return_to_kitchen,
         ).pack(fill="x", pady=10)
-        # -----------------------------------
 
         self.lbl_status = ttk.Label(
             panel, text="Status: Idle", foreground="blue", font=("Arial", 11, "bold")
         )
         self.lbl_status.pack(pady=10)
 
-    # --- [NEW] HÀM XỬ LÝ VỀ BẾP ---
-    def return_to_kitchen(self):
-        print("!!! INTERRUPT: RETURNING TO KITCHEN !!!")
-
-        # 1. Dừng robot ngay lập tức
+    # --- [NEW] HÀM RESET TOÀN BỘ ---
+    def reset_system(self):
+        print("--- SYSTEM RESET ---")
         self.stop_robot()
 
-        # 2. Xóa sạch hàng đợi hiện tại
+        # 1. Reset logic
+        self.is_executing = False
         self.destination_queue = []
         self.task_names = []
+        self.destination = None
+        self.global_path = []
+        self.is_waiting = False
 
-        # 3. Thêm Bếp vào làm nhiệm vụ duy nhất
+        # 2. Reset vị trí Robot về Bếp
+        if "Kitchen" in self.locations:
+            self.robot.x, self.robot.y = self.locations["Kitchen"]
+            self.robot.theta = -1.57  # Hướng xuống dưới
+            self.robot.v_l = 0
+            self.robot.v_r = 0
+
+        # 3. Xóa dữ liệu vẽ đường
+        self.x_data = []
+        self.y_data = []
+        self.path_line.set_data([], [])
+        self.global_path_line.set_data([], [])
+        self.destination_marker.set_data([], [])
+
+        # 4. Cập nhật GUI
+        self.update_queue_label()
+        self.lbl_status.config(text="Status: System Reset Done.")
+        self.canvas.draw_idle()
+
+    # --- CÁC HÀM KHÁC GIỮ NGUYÊN ---
+    def return_to_kitchen(self):
+        print("!!! INTERRUPT: RETURNING TO KITCHEN !!!")
+        self.stop_robot()
+        self.destination_queue = []
+        self.task_names = []
         if "Kitchen" in self.locations:
             self.destination_queue.append(self.locations["Kitchen"])
             self.task_names.append("Kitchen (Emergency)")
 
-        # 4. Reset trạng thái điều khiển để vòng lặp update nhận nhiệm vụ mới ngay
         self.destination = None
         self.global_path = []
         self.current_wp_index = 0
         self.is_waiting = False
-        self.is_executing = True  # Bắt buộc chạy ngay
-
-        # 5. Cập nhật giao diện
+        self.is_executing = True
         self.update_queue_label()
         self.lbl_status.config(text="Status: EMERGENCY RETURN!", foreground="red")
 
@@ -213,7 +240,6 @@ class RobotSimulatorGUI:
 
     def update(self, frame):
         if self.is_executing:
-            # 1. Lấy nhiệm vụ mới
             if self.destination is None and self.destination_queue:
                 self.destination = self.destination_queue.pop(0)
                 current_task = self.task_names.pop(0)
@@ -222,7 +248,6 @@ class RobotSimulatorGUI:
                 self.global_path = []
                 self.current_wp_index = 0
 
-                # Reset path cũ và tính đường mới nếu dùng A*/Dijkstra
                 if self.current_algo in ["A_STAR", "DIJKSTRA"]:
                     start_pos = (self.robot.x, self.robot.y)
                     if self.current_algo == "A_STAR":
@@ -237,9 +262,11 @@ class RobotSimulatorGUI:
                         gy = [p[1] for p in self.global_path]
                         self.global_path_line.set_data(gx, gy)
                     else:
-                        self.destination = None  # Không tìm thấy đường thì bỏ qua
+                        print(
+                            f"⚠️ Cảnh báo: {self.current_algo} không tìm được đường! Chuyển sang DWA tạm thời."
+                        )
+                        self.global_path_line.set_data([], [])
 
-            # 2. Điều khiển di chuyển
             if self.destination is not None:
                 self.destination_marker.set_data(
                     [self.destination[0]], [self.destination[1]]
@@ -264,26 +291,29 @@ class RobotSimulatorGUI:
 
                 elif not self.is_waiting:
                     v_l, v_r = 0, 0
-                    if self.current_algo == "DWA":
-                        v_l, v_r = self.dwa.plan(self.destination)
-                    elif self.current_algo == "BUG":
-                        v_l, v_r = self.bug.plan(
-                            (self.robot.x, self.robot.y), self.destination
-                        )
-                    elif (
+                    use_global_path = (
                         self.current_algo in ["A_STAR", "DIJKSTRA"] and self.global_path
-                    ):
+                    )
+
+                    if use_global_path:
                         if self.current_wp_index < len(self.global_path):
                             target_wp = self.global_path[self.current_wp_index]
                             dist_wp = np.hypot(
                                 target_wp[0] - self.robot.x, target_wp[1] - self.robot.y
                             )
-                            if dist_wp < 0.5:
+                            if dist_wp < 0.6:
                                 self.current_wp_index += 1
-                            drive_target = self.global_path[
-                                min(self.current_wp_index, len(self.global_path) - 1)
-                            ]
+
+                            idx = min(self.current_wp_index, len(self.global_path) - 1)
+                            drive_target = self.global_path[idx]
                             v_l, v_r = self.dwa.plan(drive_target)
+                    else:
+                        if self.current_algo == "BUG":
+                            v_l, v_r = self.bug.plan(
+                                (self.robot.x, self.robot.y), self.destination
+                            )
+                        else:
+                            v_l, v_r = self.dwa.plan(self.destination)
 
                     self.robot.v_l = v_l
                     self.robot.v_r = v_r
