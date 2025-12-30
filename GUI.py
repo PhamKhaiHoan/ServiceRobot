@@ -2,13 +2,11 @@ import tkinter as tk
 from tkinter import ttk
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.animation import FuncAnimation
-from matplotlib.path import Path
 import time
 
-# Import tất cả các planner
+# Import các thuật toán
 from DWA_planner import DWA_Planner
 from bug_planner import BugPlanner
 from astar_planner import AStarPlanner
@@ -16,301 +14,278 @@ from dijkstra_planner import DijkstraPlanner
 
 
 class RobotSimulatorGUI:
-    def __init__(self, root, robot, obstacles, dt=0.1):
+    def __init__(self, root, robot, obstacles, locations, dt=0.1):
         self.root = root
         self.robot = robot
         self.obstacles = obstacles
+        self.locations = locations  # Dict chứa tọa độ bàn/bếp
         self.dt = dt
 
-        # --- QUẢN LÝ HÀNG ĐỢI (ROLE 1) ---
-        self.destination_queue = []
-        self.is_waiting = False
+        # --- TRẠNG THÁI HỆ THỐNG ---
+        self.destination_queue = []  # Hàng đợi tọa độ [(x,y), ...]
+        self.task_names = []  # Tên nhiệm vụ để hiển thị ["Table 1", "Kitchen"...]
+        self.is_executing = False  # Cờ cho phép chạy (True = đang chạy)
+        self.is_waiting = False  # Cờ đang phục vụ (dừng 2s)
         self.wait_start_time = 0
         self.wait_duration = 2.0
+        self.destination = None  # Điểm đến hiện tại
 
-        # --- QUẢN LÝ THUẬT TOÁN (ROLE 2) ---
+        # --- PATH PLANNING ---
         self.current_algo = "DWA"  # Mặc định
-        # Khởi tạo các planner
+
+        # --- KHỞI TẠO PLANNERS (SỬA LỖI TẠI ĐÂY) ---
         self.dwa = DWA_Planner(robot, obstacles, dt, predict_time=2.0)
+
+        # [FIX] BugPlanner không nhận dt, chỉ nhận step_size
         self.bug = BugPlanner(robot, obstacles, step_size=0.5)
+
         self.astar = AStarPlanner(obstacles, resolution=0.5, robot_radius=1.0)
         self.dijkstra = DijkstraPlanner(obstacles, resolution=0.5, robot_radius=1.0)
 
-        # Biến phục vụ việc bám đường (Path Following)
-        self.global_path = []  # Chứa danh sách các điểm [ (x1,y1), (x2,y2), ... ]
-        self.current_waypoint_index = 0
+        self.global_path = []
+        self.current_wp_index = 0
 
-        # Các cờ trạng thái
-        self.auto_mode = False
-        self.destination = None
-        self.destination_marker = None
-
-        # Đồ họa
-        self.x_data, self.y_data = [], []
+        # --- ĐỒ HỌA (MATPLOTLIB) ---
         self.fig, self.ax = plt.subplots(figsize=(6, 6))
-        self.ax.set_xlim(-12, 12)  # Zoom map cho vừa mắt
-        self.ax.set_ylim(-12, 16)
+        self.ax.set_xlim(-15, 15)
+        self.ax.set_ylim(-15, 15)
         self.ax.set_aspect("equal")
-        self.ax.grid()
+        self.ax.grid(True, alpha=0.5)
 
+        # Vẽ vật cản
         for obs in self.obstacles.obs:
             self.ax.add_patch(obs)
 
-        (self.path_line,) = self.ax.plot([], [], "b-", label="Path", linewidth=1)
-        (self.global_path_line,) = self.ax.plot(
-            [], [], "g--", label="Global Plan", alpha=0.5
-        )  # Vẽ đường dự kiến
-        (self.robot_dot,) = self.ax.plot([], [], "ro", label="Robot")
+        # Vẽ tên địa điểm lên bản đồ
+        for name, (x, y) in self.locations.items():
+            self.ax.text(
+                x, y, name, color="blue", fontsize=8, fontweight="bold", ha="center"
+            )
+            self.ax.plot(x, y, "b+", markersize=5)
 
-        self.ax.add_patch(self.robot.robot_body)
-        self.ax.add_patch(self.robot.left_wheel)
-        self.ax.add_patch(self.robot.right_wheel)
-        self.ax.add_patch(self.robot.heading_arrow)
+        # Robot & Path
+        self.robot_body = self.ax.add_patch(self.robot.robot_body)
+        self.left_wheel = self.ax.add_patch(self.robot.left_wheel)
+        self.right_wheel = self.ax.add_patch(self.robot.right_wheel)
+        self.heading_arrow = self.ax.add_patch(self.robot.heading_arrow)
+        (self.path_line,) = self.ax.plot([], [], "r-", linewidth=1, alpha=0.5)
+        (self.global_path_line,) = self.ax.plot([], [], "g--", linewidth=1.5, alpha=0.7)
+        (self.destination_marker,) = self.ax.plot([], [], "r*", markersize=12)
 
+        self.x_data, self.y_data = [], []
+
+        # --- CANVAS ---
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
         self.canvas.get_tk_widget().grid(
-            row=0, column=0, rowspan=15, sticky="nsew", padx=10, pady=10
+            row=0, column=0, rowspan=20, sticky="nsew", padx=5, pady=5
         )
-        self.canvas.draw()
 
+        # --- CONTROL PANEL ---
         self._create_controls()
-        self._create_status_display()
 
-        self.root.bind("<KeyPress>", self.key_press)
-        self.fig.canvas.mpl_connect("button_press_event", self.on_click)
-
+        # Animation Loop
         self.ani = FuncAnimation(
-            self.fig, self.update, interval=int(self.dt * 1000), blit=False
+            self.fig, self.update, interval=int(dt * 1000), blit=False
         )
 
     def _create_controls(self):
-        btn_frame = ttk.Frame(self.root)
-        btn_frame.grid(row=0, column=1, sticky="n", padx=10)
+        panel = ttk.Frame(self.root)
+        panel.grid(row=0, column=1, sticky="n", padx=10, pady=10)
 
-        # Nút điều khiển xe
-        ttk.Label(btn_frame, text="MANUAL CONTROL", font=("Arial", 10, "bold")).grid(
-            row=0, column=0, columnspan=3, pady=5
-        )
-        ttk.Button(btn_frame, text="↑", command=self.move_forward).grid(row=1, column=1)
-        ttk.Button(btn_frame, text="←", command=self.turn_left).grid(row=2, column=0)
-        ttk.Button(btn_frame, text="STOP", command=self.stop).grid(row=2, column=1)
-        ttk.Button(btn_frame, text="→", command=self.turn_right).grid(row=2, column=2)
-        ttk.Button(btn_frame, text="↓", command=self.move_backward).grid(
-            row=3, column=1
+        # 1. Chọn Logic
+        ttk.Label(panel, text="LOGIC MODE", font=("Arial", 10, "bold")).pack(
+            pady=(0, 5)
         )
 
-        # Nút chọn thuật toán
-        ttk.Label(btn_frame, text="ALGORITHM", font=("Arial", 10, "bold")).grid(
-            row=4, column=0, columnspan=3, pady=(15, 5)
-        )
         self.algo_var = tk.StringVar(value="DWA")
+        frame_algo = ttk.Frame(panel)
+        frame_algo.pack()
+
         algos = ["DWA", "BUG", "A_STAR", "DIJKSTRA"]
-        for i, mode in enumerate(algos):
+        for alg in algos:
             rb = ttk.Radiobutton(
-                btn_frame,
-                text=mode,
+                frame_algo,
+                text=alg,
                 variable=self.algo_var,
-                value=mode,
+                value=alg,
                 command=self.change_algo,
             )
-            rb.grid(row=5 + i, column=0, columnspan=3, sticky="w")
+            rb.pack(anchor="w")
 
-        ttk.Button(btn_frame, text="RESET", command=self.reset).grid(
-            row=10, column=0, columnspan=3, pady=15
+        # 2. Chọn Bàn (Queue)
+        ttk.Separator(panel, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Label(panel, text="SELECT TABLES", font=("Arial", 10, "bold")).pack()
+
+        frame_tables = ttk.Frame(panel)
+        frame_tables.pack(pady=5)
+
+        # Tạo nút bấm động dựa trên danh sách locations
+        i = 0
+        sorted_locs = sorted([k for k in self.locations.keys() if k != "Kitchen"])
+        for name in sorted_locs:
+            btn = ttk.Button(
+                frame_tables,
+                text=f"Add {name}",
+                command=lambda n=name: self.add_to_queue(n),
+            )
+            btn.grid(row=i // 2, column=i % 2, padx=2, pady=2)
+            i += 1
+
+        # 3. Điều khiển chạy
+        ttk.Separator(panel, orient="horizontal").pack(fill="x", pady=10)
+
+        self.lbl_queue = ttk.Label(
+            panel, text="Queue: Empty", foreground="gray", wraplength=150
         )
+        self.lbl_queue.pack(pady=5)
 
-    def _create_status_display(self):
-        status_frame = ttk.LabelFrame(self.root, text="Info", padding=10)
-        status_frame.grid(row=1, column=1, sticky="nw", padx=10)
-        self.status_label = ttk.Label(
-            status_frame, text="Ready", foreground="blue", font=("Arial", 11)
+        btn_start = ttk.Button(
+            panel, text="▶ START SERVICE", command=self.start_service
         )
-        self.status_label.pack()
+        btn_start.pack(fill="x", pady=2)
 
+        btn_clear = ttk.Button(panel, text="✖ CLEAR QUEUE", command=self.clear_queue)
+        btn_clear.pack(fill="x", pady=2)
+
+        self.lbl_status = ttk.Label(
+            panel, text="Status: Idle", foreground="blue", font=("Arial", 11, "bold")
+        )
+        self.lbl_status.pack(pady=10)
+
+    # --- LOGIC CONTROL ---
     def change_algo(self):
         self.current_algo = self.algo_var.get()
-        print(f"Switched to: {self.current_algo}")
-        self.global_path = []  # Reset đường cũ khi đổi thuật toán
+        self.global_path = []
+        print(f"Algorithm changed to: {self.current_algo}")
 
+    def add_to_queue(self, name):
+        if name in self.locations:
+            self.destination_queue.append(self.locations[name])
+            self.task_names.append(name)
+            self.update_queue_label()
+
+    def update_queue_label(self):
+        text = " -> ".join(self.task_names)
+        self.lbl_queue.config(text=f"Queue: {text}")
+
+    def clear_queue(self):
+        self.destination_queue = []
+        self.task_names = []
+        self.is_executing = False
+        self.destination = None
+        self.global_path = []
+        self.update_queue_label()
+        self.lbl_status.config(text="Status: Stopped & Cleared")
+
+    def start_service(self):
+        if not self.destination_queue:
+            self.lbl_status.config(text="Status: Queue Empty!")
+            return
+
+        # Tự động thêm 'Kitchen' vào cuối hàng đợi để xe quay về
+        if not self.task_names or self.task_names[-1] != "Kitchen":
+            self.destination_queue.append(self.locations["Kitchen"])
+            self.task_names.append("Kitchen")
+            self.update_queue_label()
+
+        self.is_executing = True
+        self.lbl_status.config(text="Status: Executing...")
+
+    # --- UPDATE LOOP ---
     def update(self, frame):
-        # 1. LOGIC TỰ ĐỘNG (AUTO MODE)
-        # Lấy nhiệm vụ từ hàng đợi nếu đang rảnh
-        if self.destination is None and self.destination_queue:
-            self.destination = self.destination_queue.pop(0)
-            self.global_path = []  # Reset đường global
-            self.current_waypoint_index = 0
+        if self.is_executing:
+            # 1. Lấy nhiệm vụ mới
+            if self.destination is None and self.destination_queue:
+                self.destination = self.destination_queue.pop(0)
+                current_task = self.task_names.pop(0)
+                self.update_queue_label()
+                self.lbl_status.config(text=f"Going to: {current_task}")
 
-            # Nếu dùng A* hoặc Dijkstra, tính toán đường đi NGAY LÚC NÀY
-            if self.current_algo in ["A_STAR", "DIJKSTRA"]:
-                print(f"Planning path using {self.current_algo}...")
-                start = (self.robot.x, self.robot.y)
-                if self.current_algo == "A_STAR":
-                    self.global_path = self.astar.plan(start, self.destination)
-                else:
-                    self.global_path = self.dijkstra.plan(start, self.destination)
+                # Reset path cũ
+                self.global_path = []
+                self.current_wp_index = 0
 
-                if not self.global_path:
-                    print("Failed to find path!")
-                    self.status_label.config(text="No Path Found!", foreground="red")
-                    self.destination = None  # Bỏ qua điểm này
-                else:
-                    print(f"Path found with {len(self.global_path)} steps.")
-                    # Vẽ đường dự kiến lên map
-                    path_x = [p[0] for p in self.global_path]
-                    path_y = [p[1] for p in self.global_path]
-                    self.global_path_line.set_data(path_x, path_y)
-
-            # Vẽ marker đích
-            if self.destination_marker:
-                self.destination_marker.remove()
-            (self.destination_marker,) = self.ax.plot(
-                self.destination[0], self.destination[1], "r*", markersize=15
-            )
-
-        # Xử lý di chuyển
-        if self.auto_mode and self.destination is not None:
-            dist_to_goal = np.hypot(
-                self.destination[0] - self.robot.x, self.destination[1] - self.robot.y
-            )
-
-            # Kiểm tra đến đích
-            if dist_to_goal < 0.3:
-                self.stop()
-                if not self.is_waiting:
-                    self.is_waiting = True
-                    self.wait_start_time = time.time()
-                    self.status_label.config(text="Serving...", foreground="green")
-                elif time.time() - self.wait_start_time > self.wait_duration:
-                    self.is_waiting = False
-                    self.destination = None
-                    self.global_path = []
-                    self.global_path_line.set_data([], [])  # Xóa đường vẽ
-                    if self.destination_marker:
-                        self.destination_marker.remove()
-                        self.destination_marker = None
-                    if not self.destination_queue:
-                        self.status_label.config(text="All Done!", foreground="blue")
-
-            # Chưa đến đích -> Tính toán di chuyển
-            else:
-                v_l, v_r = 0, 0
-
-                # --- TRƯỜNG HỢP 1: DWA hoặc BUG (Chạy trực tiếp) ---
-                if self.current_algo == "DWA":
-                    v_l, v_r = self.dwa.plan(self.destination)
-                elif self.current_algo == "BUG":
-                    v_l, v_r = self.bug.plan(
-                        (self.robot.x, self.robot.y), self.destination
-                    )
-
-                # --- TRƯỜNG HỢP 2: A* hoặc DIJKSTRA (Bám theo đường) ---
-                elif self.current_algo in ["A_STAR", "DIJKSTRA"] and self.global_path:
-                    # Tìm điểm waypoint tiếp theo trong danh sách global_path
-                    # Logic: Nếu robot đến gần waypoint hiện tại (< 0.5m), chuyển sang waypoint kế tiếp
-                    if self.current_waypoint_index < len(self.global_path):
-                        local_target = self.global_path[self.current_waypoint_index]
-                        dist_to_waypoint = np.hypot(
-                            local_target[0] - self.robot.x,
-                            local_target[1] - self.robot.y,
+                # Plan đường (A*/Dijkstra)
+                if self.current_algo in ["A_STAR", "DIJKSTRA"]:
+                    start_pos = (self.robot.x, self.robot.y)
+                    if self.current_algo == "A_STAR":
+                        self.global_path = self.astar.plan(start_pos, self.destination)
+                    else:
+                        self.global_path = self.dijkstra.plan(
+                            start_pos, self.destination
                         )
 
-                        if dist_to_waypoint < 0.5:
-                            self.current_waypoint_index += 1  # Sang điểm tiếp theo
+                    if self.global_path:
+                        gx = [p[0] for p in self.global_path]
+                        gy = [p[1] for p in self.global_path]
+                        self.global_path_line.set_data(gx, gy)
+                    else:
+                        print("Không tìm thấy đường!")
+                        self.destination = None
 
-                        # Dùng DWA để lái đến điểm waypoint đó (Local Planner follow Global Path)
-                        # Nếu hết đường thì lái thẳng đến đích gốc
-                        if self.current_waypoint_index < len(self.global_path):
-                            target_now = self.global_path[self.current_waypoint_index]
-                        else:
-                            target_now = self.destination
-
-                        v_l, v_r = self.dwa.plan(target_now)
-
-                # Cập nhật vận tốc
-                self.robot.v_l = v_l
-                self.robot.v_r = v_r
-
-                # Hiển thị
-                self.status_label.config(
-                    text=f"Mode: {self.current_algo}\nDist: {dist_to_goal:.2f}m",
-                    foreground="black",
+            # 2. Di chuyển
+            if self.destination is not None:
+                self.destination_marker.set_data(
+                    [self.destination[0]], [self.destination[1]]
+                )
+                dist = np.hypot(
+                    self.destination[0] - self.robot.x,
+                    self.destination[1] - self.robot.y,
                 )
 
-        # 2. CẬP NHẬT VẬT LÝ
-        if self.robot.v_l != 0 or self.robot.v_r != 0:
+                # Đến đích
+                if dist < 0.3:
+                    self.stop_robot()
+                    if not self.is_waiting:
+                        self.is_waiting = True
+                        self.wait_start_time = time.time()
+                        self.lbl_status.config(text="Arrived! Serving...")
+                    elif time.time() - self.wait_start_time > self.wait_duration:
+                        self.is_waiting = False
+                        self.destination = None
+                        if not self.destination_queue:
+                            self.is_executing = False
+                            self.lbl_status.config(text="Status: All Done! At Kitchen.")
+
+                # Đang đi
+                elif not self.is_waiting:
+                    v_l, v_r = 0, 0
+
+                    if self.current_algo == "DWA":
+                        v_l, v_r = self.dwa.plan(self.destination)
+                    elif self.current_algo == "BUG":
+                        v_l, v_r = self.bug.plan(
+                            (self.robot.x, self.robot.y), self.destination
+                        )
+                    elif (
+                        self.current_algo in ["A_STAR", "DIJKSTRA"] and self.global_path
+                    ):
+                        # Follow path logic
+                        if self.current_wp_index < len(self.global_path):
+                            target_wp = self.global_path[self.current_wp_index]
+                            dist_wp = np.hypot(
+                                target_wp[0] - self.robot.x, target_wp[1] - self.robot.y
+                            )
+                            if dist_wp < 0.5:
+                                self.current_wp_index += 1
+
+                            drive_target = self.global_path[
+                                min(self.current_wp_index, len(self.global_path) - 1)
+                            ]
+                            v_l, v_r = self.dwa.plan(drive_target)
+
+                    self.robot.v_l = v_l
+                    self.robot.v_r = v_r
+
             self.robot.update_pose(self.dt)
             self.x_data.append(self.robot.x)
             self.y_data.append(self.robot.y)
 
-        # 3. CẬP NHẬT ĐỒ HỌA
+        # Update Graphics
         self.path_line.set_data(self.x_data, self.y_data)
-        self.robot_dot.set_data([self.robot.x], [self.robot.y])
         self.robot.update_graphics(self.ax)
         self.canvas.draw_idle()
-        return (self.path_line,)
 
-    # --- CÁC HÀM HỖ TRỢ ---
-    def check_collision(self, x, y, theta):
-        # (Giữ nguyên logic va chạm cũ của bạn nếu cần dùng BugPlanner để check)
-        return False
-
-    def move_forward(self):
-        self.robot.v_l = 1.5
-        self.robot.v_r = 1.5
-        self.auto_mode = False
-
-    def move_backward(self):
-        self.robot.v_l = -1.5
-        self.robot.v_r = -1.5
-        self.auto_mode = False
-
-    def turn_left(self):
-        self.robot.v_l = -0.5
-        self.robot.v_r = 0.5
-        self.auto_mode = False
-
-    def turn_right(self):
-        self.robot.v_l = 0.5
-        self.robot.v_r = -0.5
-        self.auto_mode = False
-
-    def stop(self):
+    def stop_robot(self):
         self.robot.v_l = 0
         self.robot.v_r = 0
-
-    def reset(self):
-        self.auto_mode = False
-        self.destination_queue = []
-        self.destination = None
-        self.global_path = []
-        self.global_path_line.set_data([], [])
-        if self.destination_marker:
-            self.destination_marker.remove()
-        self.robot.reset()
-        self.x_data.clear()
-        self.y_data.clear()
-        self.path_line.set_data([], [])
-        self.robot_dot.set_data([], [])
-        self.canvas.draw_idle()
-
-    def key_press(self, event):
-        if event.keysym == "Up":
-            self.move_forward()
-        elif event.keysym == "Down":
-            self.move_backward()
-        elif event.keysym == "Left":
-            self.turn_left()
-        elif event.keysym == "Right":
-            self.turn_right()
-        elif event.keysym == "space":
-            self.stop()
-
-    def on_click(self, event):
-        if event.inaxes != self.ax:
-            return
-        target = (event.xdata, event.ydata)
-        self.destination_queue.append(target)
-        self.auto_mode = True
-        self.ax.plot(target[0], target[1], "bx", markersize=8)  
-        self.canvas.draw_idle()
-        print(f"Added task: {target}")
