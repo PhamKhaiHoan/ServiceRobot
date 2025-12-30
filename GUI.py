@@ -11,9 +11,9 @@ import time
 # Import planner (Chỉ giữ lại DWA cho Người 1 test logic)
 from DWA_planner import DWA_Planner
 
-# from bug_planner import BugPlanner      <-- Tạm tắt
-# from astar_planner import AStarPlanner  <-- Tạm tắt
-# from dijkstra_planner import DijkstraPlanner <-- Tạm tắt
+from bug_planner import BugPlanner     
+from astar_planner import AStarPlanner  
+from dijkstra_planner import DijkstraPlanner 
 
 
 class RobotSimulatorGUI:
