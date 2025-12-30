@@ -144,77 +144,69 @@ class RobotSimulatorGUI:
         return False
 
     def update(self, frame):
-        # --- LOGIC NGƯỜI 1: XỬ LÝ HÀNG ĐỢI ---
-
-        # 1. Nếu chưa có đích nhưng hàng đợi còn -> Lấy điểm tiếp theo
+        # --- 1. LOGIC TỰ ĐỘNG (AUTO MODE) ---
+        # Nếu đang auto, tính toán vận tốc dựa trên DWA/Planner
         if self.destination is None and self.destination_queue:
             self.destination = self.destination_queue.pop(0)
-            print(f"--> Moving to next target: {self.destination}")
-            # Vẽ marker đích mới
             if self.destination_marker:
                 self.destination_marker.remove()
             (self.destination_marker,) = self.ax.plot(
                 self.destination[0], self.destination[1], "r*", markersize=15
             )
 
-        # 2. Nếu đang có đích (Auto Mode)
         if self.auto_mode and self.destination is not None:
             dx = self.destination[0] - self.robot.x
             dy = self.destination[1] - self.robot.y
             dist = np.hypot(dx, dy)
 
-            # Đã đến nơi (< 0.3m)
             if dist < 0.3:
                 self.stop()
                 if not self.is_waiting:
-                    # Bắt đầu chờ
                     self.is_waiting = True
                     self.wait_start_time = time.time()
                     self.collision_label.config(text="Arrived! Serving...")
                 else:
-                    # Kiểm tra thời gian chờ
                     if time.time() - self.wait_start_time > self.wait_duration:
                         self.is_waiting = False
-                        self.destination = None  # Xóa đích để lấy cái tiếp theo
+                        self.destination = None
                         if self.destination_marker:
                             self.destination_marker.remove()
                             self.destination_marker = None
-
                         if not self.destination_queue:
-                            self.collision_label.config(text="All Tasks Done!")
-                            print("Done all tasks.")
-
-            # Chưa đến nơi -> Di chuyển
+                            self.collision_label.config(text="Done!")
             else:
-                self.collision_label.config(
-                    text=f"Going to: ({self.destination[0]:.1f}, {self.destination[1]:.1f})"
-                )
-                # Gọi DWA Planner
+                # DWA tính vận tốc
                 v_l, v_r = self.planner.plan(goal=self.destination)
                 self.robot.v_l = v_l
                 self.robot.v_r = v_r
 
-                # Thêm nhiễu vật lý
-                wheel_noise_std = 0.1
-                noisy_v_l = self.robot.v_l + np.random.normal(0, wheel_noise_std)
-                noisy_v_r = self.robot.v_r + np.random.normal(0, wheel_noise_std)
+                # Thêm nhiễu vật lý (chỉ khi auto)
+                self.robot.v_l += np.random.normal(0, 0.1)
+                self.robot.v_r += np.random.normal(0, 0.1)
 
-                # Tính vị trí tiếp theo
-                v = (noisy_v_l + noisy_v_r) / 2
-                omega = (noisy_v_r - noisy_v_l) / self.robot.L
-                x_next = self.robot.x + v * np.cos(self.robot.theta) * self.dt
-                y_next = self.robot.y + v * np.sin(self.robot.theta) * self.dt
-                theta_next = self.robot.theta + omega * self.dt
+        # --- 2. LOGIC CẬP NHẬT VẬT LÝ (DÙNG CHUNG CHO CẢ AUTO VÀ MANUAL) ---
+        # Đoạn này đã được đưa ra ngoài 'if auto_mode', nên nút bấm sẽ hoạt động
 
-                if self.check_collision(x_next, y_next, theta_next):
-                    self.stop()
-                    self.collision_label.config(text="Collision Detected!")
-                else:
-                    self.robot.update_pose(self.dt)
-                    self.x_data.append(self.robot.x)
-                    self.y_data.append(self.robot.y)
+        # Chỉ cập nhật nếu robot đang có vận tốc (đang chạy)
+        if self.robot.v_l != 0 or self.robot.v_r != 0:
+            # Tính vị trí dự kiến để check va chạm
+            v = (self.robot.v_l + self.robot.v_r) / 2
+            omega = (self.robot.v_r - self.robot.v_l) / self.robot.L
+            x_next = self.robot.x + v * np.cos(self.robot.theta) * self.dt
+            y_next = self.robot.y + v * np.sin(self.robot.theta) * self.dt
+            theta_next = self.robot.theta + omega * self.dt
+            theta_next = (theta_next + np.pi) % (2 * np.pi) - np.pi  # Normalize
 
-        # Update Graphics
+            if self.check_collision(x_next, y_next, theta_next):
+                self.stop()
+                self.collision_label.config(text="Collision Detected!")
+            else:
+                # Nếu không va chạm thì mới cập nhật vị trí thật
+                self.robot.update_pose(self.dt)
+                self.x_data.append(self.robot.x)
+                self.y_data.append(self.robot.y)
+
+        # --- 3. CẬP NHẬT ĐỒ HỌA ---
         self.path_line.set_data(self.x_data, self.y_data)
         self.robot_dot.set_data([self.robot.x], [self.robot.y])
         self.robot.update_graphics(self.ax)
