@@ -2,35 +2,62 @@ import tkinter as tk
 import matplotlib.patches as patches
 import Robot as rob
 import Obstacle as obs_set
+from Obstacle import RestaurantMap, DynamicObstacleManager
 from GUI import RobotSimulatorGUI
 
 # --- 1. CẤU HÌNH ĐỊA ĐIỂM (LOCATIONS) ---
-# Tọa độ điểm đến AN TOÀN (Robot sẽ đi đến đây)
+# Tọa độ điểm đến AN TOÀN - Robot sẽ đứng CẠNH bàn (không phải giữa bàn)
 LOCATIONS = {
-    "Kitchen": (0, 10),  # Bếp (Trên cùng)
-    "Table 1": (-7, 6),  # Bàn 1 (Trái trên)
-    "Table 2": (7, 6),  # Bàn 2 (Phải trên)
-    "Table 3": (-7, 0),  # Bàn 3 (Trái giữa)
-    "Table 4": (7, 0),  # Bàn 4 (Phải giữa)
-    "Table 5": (-7, -6),  # Bàn 5 (Trái dưới)
-    "Table 6": (7, -6),  # Bàn 6 (Phải dưới)
+    "Kitchen": (0, 10),  # Bếp (phía trước quầy)
+    "Table 1": (-5, 5),  # Cạnh bàn 1 (phía phải của bàn)
+    "Table 2": (5, 5),  # Cạnh bàn 2 (phía trái của bàn)
+    "Table 3": (-5, -1),  # Cạnh bàn 3 (phía phải của bàn)
+    "Table 4": (5, -1),  # Cạnh bàn 4 (phía trái của bàn)
+    "Table 5": (-5, -7),  # Cạnh bàn 5 (phía phải của bàn)
+    "Table 6": (5, -7),  # Cạnh bàn 6 (phía trái của bàn)
 }
+
+# Vùng bàn để tránh (x, y, width, height)
+TABLE_AREAS = [
+    (-10, 4, 4, 4),  # Bàn 1
+    (6, 4, 4, 4),  # Bàn 2
+    (-10, -3, 4, 4),  # Bàn 3
+    (6, -3, 4, 4),  # Bàn 4
+    (-10, -9, 4, 4),  # Bàn 5
+    (6, -9, 4, 4),  # Bàn 6
+    (-5, 11, 10, 4),  # Bếp
+]
 
 # --- 2. TẠO VẬT CẢN (VISUALS) ---
 obstacles = obs_set.Obstacle()
 
-# Bếp
-obstacles.add(patches.Rectangle((-4, 12), 8, 2, color="black"))
+# Tạo bếp đẹp
+for patch in RestaurantMap.create_kitchen(0, 11.5, width=10, height=2.5):
+    obstacles.add(patch)
 
-# 6 Bàn (Hình vuông 3x3)
-obstacles.add(patches.Rectangle((-13, 5), 3, 3, color="brown"))  # Bàn 1
-obstacles.add(patches.Rectangle((10, 5), 3, 3, color="brown"))  # Bàn 2
-obstacles.add(patches.Rectangle((-13, -1), 3, 3, color="brown"))  # Bàn 3
-obstacles.add(patches.Rectangle((10, -1), 3, 3, color="brown"))  # Bàn 4
-obstacles.add(patches.Rectangle((-13, -7), 3, 3, color="brown"))  # Bàn 5
-obstacles.add(patches.Rectangle((10, -7), 3, 3, color="brown"))  # Bàn 6
+# Tạo 6 bàn (không có ghế)
+TABLE_POSITIONS = [
+    (-8, 5, "square", "Table 1"),
+    (8, 5, "round", "Table 2"),
+    (-8, -1, "square", "Table 3"),
+    (8, -1, "round", "Table 4"),
+    (-8, -7, "square", "Table 5"),
+    (8, -7, "round", "Table 6"),
+]
 
-# --- 3. KHỞI TẠO ROBOT ---
+for tx, ty, ttype, tname in TABLE_POSITIONS:
+    for patch in RestaurantMap.create_table(tx, ty, ttype, tname):
+        obstacles.add(patch)
+
+# Tạo tường
+for patch in RestaurantMap.create_walls(bounds=(-14, 14, -12, 15)):
+    obstacles.add(patch)
+
+# --- 3. TẠO KHÁCH HÀNG DI CHUYỂN ---
+customer_manager = DynamicObstacleManager(num_customers=4)
+customer_manager.set_avoid_areas(TABLE_AREAS)
+
+# --- 4. KHỞI TẠO ROBOT ---
 dt = 0.1
 robot = rob.Differential_Robot(
     L=1.0, robot_length=1.5, robot_width=1.0, wheel_length=0.5, wheel_width=0.2
@@ -38,11 +65,18 @@ robot = rob.Differential_Robot(
 robot.x, robot.y = LOCATIONS["Kitchen"]  # Xuất phát từ Bếp
 robot.theta = -1.57  # Hướng mặt xuống dưới
 
-# --- 4. CHẠY ---
+# --- 5. CHẠY ---
 root = tk.Tk()
 root.title("Restaurant Service Robot")
 
-# Truyền locations vào GUI
-app = RobotSimulatorGUI(root, robot, obstacles, locations=LOCATIONS, dt=dt)
+# Truyền locations và customer_manager vào GUI
+app = RobotSimulatorGUI(
+    root,
+    robot,
+    obstacles,
+    locations=LOCATIONS,
+    dt=dt,
+    customer_manager=customer_manager,
+)
 
 root.mainloop()
